@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="icon" href="/favicon/favicon.ico" type="image/x-icon">
+  <title>404 Not Found</title>
+  <link rel="stylesheet" type="text/css" href="/css/style.css">
+</head>
+<body>
+  <!-- Include Three.js and the necessary example scripts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // Update these variables to change the error messages
+    var topMessage = "404";
+    var bottomMessage = "NOT FOUND";
+    
+    // Sphere orientation settings
+    var sphereBaseRotation = 6/4*Math.PI; // 90 degrees (π/2), adjust this value to find the sweet spot
+    var sphereRotationLimit = 55; // +/- 45 degrees of rotation allowed
+
+    // Image paths - updated with full relative paths and fallback handling
+    var imagePaths = {
+      rufus: '/error_pages/rufus.png',
+      laurent: '/error_pages/laurent.png',
+      emily: '/error_pages/emily.png'
+    };
+    
+    // Debug flag to help troubleshoot image loading
+    var debug = true;
+
+    // Balloon settings
+    var balloonRadius = 3;
+    var coneHeight = 0.8;
+    var coneRadius = 0.7;
+    var stringLength = balloonRadius * 2;
+    var stringWaveCount = 3;
+    var stringWaveAmplitude = 0.5;
+    var stringSegments = 20;
+
+    // Rotation and movement settings
+    var rotationSpeed = 0.01;
+    var offsetDegrees = 270;
+    var moveSpeed = 0.03;
+    var bounceStrength = 0.8;
+    var nudgeStrength = 1.0;
+    var collisionRestitution = 0.9;
+
+    // Variables to store the meshes and their physics properties
+    var topTextMesh, bottomTextMesh;
+    var prismMeshes = [];
+    // Store references to balloon objects - moved to global scope
+    var balloons = [];
+    
+    var topPhysics = {
+      rotationDir: Math.random() > 0.5 ? 1 : -1,
+      velocityX: (Math.random() - 0.5) * moveSpeed,
+      velocityY: (Math.random() - 0.5) * moveSpeed
+    };
+    var bottomPhysics = {
+      rotationDir: Math.random() > 0.5 ? 1 : -1,
+      velocityX: (Math.random() - 0.5) * moveSpeed,
+      velocityY: (Math.random() - 0.5) * moveSpeed
+    };
+    var prismPhysics = [
+      {
+        rotationDir: Math.random() > 0.5 ? 1 : -1,
+        velocityX: (Math.random() - 0.5) * moveSpeed * 0.7,
+        velocityY: (Math.random() - 0.5) * moveSpeed * 0.7
+      },
+      {
+        rotationDir: Math.random() > 0.5 ? 1 : -1,
+        velocityX: (Math.random() - 0.5) * moveSpeed * 0.7,
+        velocityY: (Math.random() - 0.5) * moveSpeed * 0.7
+      },
+      {
+        rotationDir: Math.random() > 0.5 ? 1 : -1,
+        velocityX: (Math.random() - 0.5) * moveSpeed * 0.7,
+        velocityY: (Math.random() - 0.5) * moveSpeed * 0.7
+      }
+    ];
+
+    // Mouse position tracking
+    var mouse = new THREE.Vector2();
+    var raycaster = new THREE.Raycaster();
+    
+    // Set up the scene, camera, and renderer
+    var scene = new THREE.Scene();
+    var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 50;
+
+    var renderer = new THREE.WebGLRenderer({ 
+      antialias: true,
+      alpha: true  // Enable transparency
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x000000, 0); // Set clear color with 0 alpha
+    document.body.appendChild(renderer.domElement);
+
+    // Add ambient and point lighting
+    var ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+
+    var pointLight = new THREE.PointLight(0xffffff, 1);
+    pointLight.position.set(50, 50, 50);
+    scene.add(pointLight);
+
+    // Balloon class to create sphere with cone and wavy string
+    class Balloon {
+      constructor(texture, position, color) {
+        this.group = new THREE.Group();
+        this.position = position;
+        this.color = color || 0xffffff;
+        
+        // Create the main balloon sphere
+        this.createBalloonBody(texture);
+        
+        // Create the cone at the bottom
+        this.createBalloonTie();
+        
+        // Create the wavy string
+        this.createBalloonString();
+        
+        // Position the entire balloon group
+        this.group.position.copy(position);
+        
+        // Set initial rotation using the configurable base rotation
+        this.group.rotation.y = sphereBaseRotation;
+
+        // Store string parameters for dynamic updates
+        this.stringPoints = [];
+        this.stringBasePoints = []; // Original points without bend
+        this.stringBendFactor = 20.0; // Much higher value for more visible effect
+        this.lastVelocityX = 0; // Store last velocity for smoothing
+        this.lastPositionX = position.x; // Store the last X position for calculating movement
+        this.positionHistory = []; // Array to store position history for lag effect
+        
+        // Initialize position history with starting position
+        for (let i = 0; i < 30; i++) {
+          this.positionHistory.push(position.x);
+        }
+        
+        // Store references to the balloon body for collision detection
+        this.collisionMesh = this.balloonBody; // Only use the sphere for collisions
+      }
+      
+      createBalloonBody(texture) {
+        const sphereGeometry = new THREE.SphereGeometry(balloonRadius, 32, 32);
+        const sphereMaterial = new THREE.MeshPhongMaterial({ 
+          map: texture,
+          bumpScale: 0.02,
+          shininess: 70 // Make the balloon a bit shiny
+        });
+        this.balloonBody = new THREE.Mesh(sphereGeometry, sphereMaterial);
+        this.group.add(this.balloonBody);
+        
+        // Store the texture for reuse in the cone
+        this.texture = texture;
+      }
+      
+      createBalloonTie() {
+        const coneGeometry = new THREE.ConeGeometry(coneRadius, coneHeight, 16);
+        const coneMaterial = new THREE.MeshPhongMaterial({ 
+          map: this.texture, // Use the same texture as the balloon
+          color: 0xcccccc, // Light tint to allow texture to show through
+          shininess: 50
+        });
+        this.balloonTie = new THREE.Mesh(coneGeometry, coneMaterial);
+        
+        // Position the cone slightly below the sphere with a small gap
+        this.balloonTie.position.y = -(balloonRadius + 0.1);
+        
+        this.group.add(this.balloonTie);
+      }
+      
+      createBalloonString() {
+        // Create a wavy line for the string
+        this.stringPoints = [];
+        this.stringBasePoints = [];
+        
+        // Start point: right at the bottom of the sphere where it meets the cone
+        const startY = -(balloonRadius);
+        
+        for (let i = 0; i <= stringSegments; i++) {
+          const t = i / stringSegments;
+          // Start at the bottom of the balloon (not the cone) and extend downward
+          const y = startY - (t * stringLength);
+          const x = Math.sin(t * Math.PI * 2 * stringWaveCount) * stringWaveAmplitude;
+          
+          // Store both the current points (for rendering) and base points (for reference)
+          const point = new THREE.Vector3(x, y, 0);
+          this.stringPoints.push(point);
+          this.stringBasePoints.push(point.clone());
+        }
+        
+        const stringGeometry = new THREE.BufferGeometry().setFromPoints(this.stringPoints);
+        const stringMaterial = new THREE.LineBasicMaterial({ 
+          color: 0xffffff,
+          linewidth: 2
+        });
+        this.balloonString = new THREE.Line(stringGeometry, stringMaterial);
+        
+        this.group.add(this.balloonString);
+      }
+      
+      // New method to update string shape based on velocity
+      updateStringShape(velocityX) {
+        // No string points to update
+        if (!this.stringPoints || this.stringPoints.length === 0) return;
+        
+        // Current balloon position
+        const currentX = this.group.position.x;
+        
+        // Update position history for lagging effect
+        this.positionHistory.unshift(currentX);
+        if (this.positionHistory.length > 30) {
+          this.positionHistory.pop();
+        }
+        
+        // Update velocity with smoothing
+        this.lastVelocityX = this.lastVelocityX * 0.7 + velocityX * 0.3;
+        
+        // Update each point in the string
+        for (let i = 0; i < this.stringPoints.length; i++) {
+          // Calculate how far down the string this point is (0 = top, 1 = bottom)
+          const t = i / (this.stringPoints.length - 1);
+          
+          // Get the base point (original wave pattern)
+          const basePoint = this.stringBasePoints[i];
+          
+          // Different behaviors based on position in string
+          if (t < 0.1) {
+            // Top 10% of string follows balloon exactly
+            this.stringPoints[i].x = basePoint.x;
+          } else {
+            // Rest of string uses delayed position based on how far down it is
+            // Lower points use older positions from history
+            const historyIndex = Math.min(
+              Math.floor(t * 25), // Map t (0-1) to history indices (0-25)
+              this.positionHistory.length - 1
+            );
+            
+            // Calculate how much this point should lag behind
+            const targetX = this.positionHistory[historyIndex];
+            const currentBalloonX = this.positionHistory[0];
+            const lagAmount = currentBalloonX - targetX;
+            
+            // Additional bend based on velocity
+            const bendAmount = -this.lastVelocityX * this.stringBendFactor * Math.pow(t, 2);
+            
+            // Combine lag effect and velocity-based bending
+            this.stringPoints[i].x = basePoint.x + (lagAmount * Math.pow(t, 1.5)) + bendAmount;
+          }
+        }
+        
+        // Update the geometry
+        this.balloonString.geometry.setFromPoints(this.stringPoints);
+        this.balloonString.geometry.attributes.position.needsUpdate = true;
+        
+        // Store current position for next frame
+        this.lastPositionX = currentX;
+      }
+      
+      getMesh() {
+        return this.group;
+      }
+      
+      getCollisionMesh() {
+        return this.collisionMesh;
+      }
+    }
+
+    // Function to create prisms with image textures
+    function createImagePrisms() {
+      const textureLoader = new THREE.TextureLoader();
+      
+      // Add error handling for texture loading
+      textureLoader.setCrossOrigin('');
+      
+      // Helper function to load textures with error handling
+      function loadTextureWithFallback(path, fallbackColor) {
+        const texture = new THREE.Texture();
+        texture.generateMipmaps = false;
+        texture.minFilter = THREE.LinearFilter;
+        
+        textureLoader.load(
+          path, 
+          // Success callback
+          function(loadedTexture) {
+            texture.image = loadedTexture.image;
+            texture.needsUpdate = true;
+            if (debug) console.log(`Successfully loaded texture: ${path}`);
+          },
+          // Progress callback
+          undefined,
+          // Error callback
+          function(err) {
+            if (debug) console.error(`Failed to load texture: ${path}`, err);
+            // Create a canvas with fallback color and text
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = fallbackColor;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'white';
+            ctx.font = '24px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Image not found', canvas.width/2, canvas.height/2);
+            ctx.fillText(path, canvas.width/2, canvas.height/2 + 30);
+            
+            texture.image = canvas;
+            texture.needsUpdate = true;
+          }
+        );
+        
+        return texture;
+      }
+      
+      // 1. Balloon with Rufus image
+      const rufusTexture = loadTextureWithFallback(imagePaths.rufus, '#770000');
+      const rufusBalloon = new Balloon(rufusTexture, new THREE.Vector3(-15, -10, 0), 0x770000);
+      scene.add(rufusBalloon.getMesh());
+      prismMeshes.push(rufusBalloon.getMesh());
+      balloons.push(rufusBalloon);
+      
+      // 2. Balloon with Laurent image
+      const laurentTexture = loadTextureWithFallback(imagePaths.laurent, '#0077FF');
+      const laurentBalloon = new Balloon(laurentTexture, new THREE.Vector3(5, 10, 0), 0x0077FF);
+      scene.add(laurentBalloon.getMesh());
+      prismMeshes.push(laurentBalloon.getMesh());
+      balloons.push(laurentBalloon);
+      
+      // 3. Balloon with Emily image
+      const emilyTexture = loadTextureWithFallback(imagePaths.emily, '#00AA77');
+      const emilyBalloon = new Balloon(emilyTexture, new THREE.Vector3(15, -8, 0), 0x00AA77);
+      scene.add(emilyBalloon.getMesh());
+      prismMeshes.push(emilyBalloon.getMesh());
+      balloons.push(emilyBalloon);
+    }
+
+    // Add mouse event listeners
+    document.addEventListener('mousedown', onMouseDown, false);
+    
+    function onMouseDown(event) {
+      // Calculate mouse position in normalized device coordinates
+      mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+      
+      // Update the raycaster
+      raycaster.setFromCamera(mouse, camera);
+      
+      // Calculate objects intersecting the ray (now including prisms)
+      var allObjects = [topTextMesh, bottomTextMesh, ...prismMeshes].filter(Boolean);
+      var intersects = raycaster.intersectObjects(allObjects, true); // true for recursive (child objects)
+      
+      if (intersects.length > 0) {
+        // Object was clicked
+        const clickedMesh = intersects[0].object;
+        let physics;
+        
+        if (clickedMesh === topTextMesh) {
+          physics = topPhysics;
+        } else if (clickedMesh === bottomTextMesh) {
+          physics = bottomPhysics;
+        } else {
+          // Check if it's one of the prisms
+          for (let i = 0; i < prismMeshes.length; i++) {
+            if (clickedMesh === prismMeshes[i] || clickedMesh.parent === prismMeshes[i]) {
+              physics = prismPhysics[i];
+              break;
+            }
+          }
+        }
+        
+        if (physics) {
+          // Apply a random nudge in the direction of the mouse
+          physics.velocityX += (mouse.x * nudgeStrength);
+          physics.velocityY += (mouse.y * nudgeStrength);
+          
+          // Randomly change rotation direction sometimes
+          if (Math.random() > 0.7) {
+            physics.rotationDir *= -1;
+          }
+        }
+      }
+    }
+
+    // Load the font and create the 3D text geometries
+    var loader = new THREE.FontLoader();
+    loader.load('https://threejs.org/examples/fonts/helvetiker_regular.typeface.json', function(font) {
+      // Create the top text geometry and mesh
+      var topGeometry = new THREE.TextGeometry(topMessage, {
+        font: font,
+        size: 5,
+        height: 1,
+        curveSegments: 12,
+        bevelEnabled: true,
+        bevelThickness: 0.5,
+        bevelSize: 0.3,
+        bevelOffset: 0,
+        bevelSegments: 5
+      });
+      topGeometry.computeBoundingBox();
+      var topCenterOffset = -0.5 * (topGeometry.boundingBox.max.x - topGeometry.boundingBox.min.x);
+      var topMaterial = new THREE.MeshPhongMaterial({ color: 0x770000 });
+      topTextMesh = new THREE.Mesh(topGeometry, topMaterial);
+      topTextMesh.position.x = topCenterOffset;
+      topTextMesh.position.y = 4; // Position above center
+      // Set initial rotation to random value
+      topTextMesh.rotation.x = Math.random() * Math.PI * 2;
+      scene.add(topTextMesh);
+
+      // Create the bottom text geometry and mesh
+      var bottomGeometry = new THREE.TextGeometry(bottomMessage, {
+        font: font,
+        size: 2,
+        height: 1,
+        curveSegments: 12,
+        bevelEnabled: true,
+        bevelThickness: 0.5,
+        bevelSize: 0.3,
+        bevelOffset: 0,
+        bevelSegments: 5
+      });
+      bottomGeometry.computeBoundingBox();
+      var bottomCenterOffset = -0.5 * (bottomGeometry.boundingBox.max.x - bottomGeometry.boundingBox.min.x);
+      var bottomMaterial = new THREE.MeshPhongMaterial({ color: 0xFFA500 }); // Orange color
+      bottomTextMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+      bottomTextMesh.position.x = bottomCenterOffset;
+      bottomTextMesh.position.y = -3; // Position below center
+      // Set initial rotation with offset plus random component
+      bottomTextMesh.rotation.x = (offsetDegrees * (Math.PI / 180)) + (Math.random() * Math.PI);
+      scene.add(bottomTextMesh);
+      
+      // Create the image prisms
+      createImagePrisms();
+    });
+
+    // Calculate boundaries based on viewport size
+    function getViewportBoundaries() {
+      const frustumHeight = 2 * Math.tan(camera.fov * Math.PI / 360) * camera.position.z;
+      const frustumWidth = frustumHeight * camera.aspect;
+      return {
+        left: -frustumWidth / 2,
+        right: frustumWidth / 2,
+        top: frustumHeight / 2,
+        bottom: -frustumHeight / 2
+      };
+    }
+
+    // Animation loop with physics and boundary checks
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      const boundaries = getViewportBoundaries();
+      
+      // Create an array of all objects and their physics
+      let allObjects = [];
+      
+      if (topTextMesh) {
+        allObjects.push({ mesh: topTextMesh, physics: topPhysics });
+      }
+      
+      if (bottomTextMesh) {
+        allObjects.push({ mesh: bottomTextMesh, physics: bottomPhysics });
+      }
+      
+      // Add balloons to the objects array
+      for (let i = 0; i < prismMeshes.length; i++) {
+        if (prismMeshes[i]) {
+          allObjects.push({ 
+            mesh: prismMeshes[i], 
+            physics: prismPhysics[i],
+            // Add a collision mesh property that's just the balloon body, not strings or ties
+            collisionMesh: balloons[i] ? balloons[i].getCollisionMesh() : null
+          });
+        }
+      }
+      
+      // Check collisions between all pairs of objects - MODIFIED to use collisionMesh when available
+      for (let i = 0; i < allObjects.length; i++) {
+        for (let j = i + 1; j < allObjects.length; j++) {
+          const obj1 = allObjects[i];
+          const obj2 = allObjects[j];
+          
+          // Use collision meshes when available, otherwise use the full mesh
+          const collider1 = obj1.collisionMesh || obj1.mesh;
+          const collider2 = obj2.collisionMesh || obj2.mesh;
+          
+          const bounds1 = new THREE.Box3().setFromObject(collider1);
+          const bounds2 = new THREE.Box3().setFromObject(collider2);
+          
+          if (bounds1.intersectsBox(bounds2)) {
+            // Objects are colliding, calculate collision response
+              
+            // Find centers of each object
+            const center1 = new THREE.Vector3();
+            bounds1.getCenter(center1);
+              
+            const center2 = new THREE.Vector3();
+            bounds2.getCenter(center2);
+              
+            // Calculate collision normal (direction from obj2 to obj1)
+            const collisionNormal = new THREE.Vector3().subVectors(center1, center2).normalize();
+              
+            // Calculate relative velocity
+            const relativeVelocity = new THREE.Vector2(
+              obj1.physics.velocityX - obj2.physics.velocityX,
+              obj1.physics.velocityY - obj2.physics.velocityY
+            );
+              
+            // Project relative velocity onto collision normal
+            const relVelDotNormal = relativeVelocity.x * collisionNormal.x + relativeVelocity.y * collisionNormal.y;
+              
+            // Only apply impulse if objects are moving toward each other
+            if (relVelDotNormal < 0) {
+              // Calculate impulse scalar
+              const impulseStrength = -relVelDotNormal * collisionRestitution;
+                
+              // Apply impulse to velocities
+              obj1.physics.velocityX += collisionNormal.x * impulseStrength;
+              obj1.physics.velocityY += collisionNormal.y * impulseStrength;
+                
+              obj2.physics.velocityX -= collisionNormal.x * impulseStrength;
+              obj2.physics.velocityY -= collisionNormal.y * impulseStrength;
+                
+              // Add some small random variations to make it more interesting
+              obj1.physics.velocityX += (Math.random() - 0.5) * 0.02;
+              obj1.physics.velocityY += (Math.random() - 0.5) * 0.02;
+              obj2.physics.velocityX += (Math.random() - 0.5) * 0.02;
+              obj2.physics.velocityY += (Math.random() - 0.5) * 0.02;
+                
+              // Separate the objects to prevent sticking
+              const overlap = 0.1; // Small extra separation to prevent immediate re-collision
+              obj1.mesh.position.x += collisionNormal.x * overlap;
+              obj1.mesh.position.y += collisionNormal.y * overlap;
+              obj2.mesh.position.x -= collisionNormal.x * overlap;
+              obj2.mesh.position.y -= collisionNormal.y * overlap;
+                
+              // Occasionally change rotation direction on collision
+              if (Math.random() > 0.5) {
+                obj1.physics.rotationDir *= -1;
+              }
+              if (Math.random() > 0.5) {
+                obj2.physics.rotationDir *= -1;
+              }
+            }
+          }
+        }
+      }
+      
+      // Update each object individually
+      for (let i = 0; i < allObjects.length; i++) {
+        const obj = allObjects[i];
+        
+        // Apply rotation based on direction (different for text vs spheres)
+        if (obj.mesh === topTextMesh || obj.mesh === bottomTextMesh) {
+          obj.mesh.rotation.x += rotationSpeed * obj.physics.rotationDir;
+        } else {
+          // This is a sphere - rotate around Y axis with limited angle
+          
+          // Calculate the new rotation
+          const newRotationY = obj.mesh.rotation.y + (rotationSpeed * obj.physics.rotationDir * 0.5);
+          
+          // Convert to degrees for easier understanding (relative to the base rotation)
+          const rotationDegrees = ((newRotationY - sphereBaseRotation) * 180 / Math.PI) % 360;
+          
+          // Normalize to range -180 to 180 for easier comparison
+          const normalizedDegrees = rotationDegrees > 180 ? rotationDegrees - 360 : 
+                                  (rotationDegrees < -180 ? rotationDegrees + 360 : rotationDegrees);
+          
+          // Limit rotation to +/- specified degrees from center (base rotation)
+          if (normalizedDegrees > sphereRotationLimit) {
+            // Too far right, reverse direction
+            obj.physics.rotationDir = -1;
+          } else if (normalizedDegrees < -sphereRotationLimit) {
+            // Too far left, reverse direction
+            obj.physics.rotationDir = 1;
+          } else {
+            // Within acceptable range, apply rotation
+            obj.mesh.rotation.y = newRotationY;
+          }
+        }
+        
+        // Apply movement
+        obj.mesh.position.x += obj.physics.velocityX;
+        obj.mesh.position.y += obj.physics.velocityY;
+        
+        // Update balloon string physics if this is a balloon - USE THE ACTUAL VELOCITYX
+        if (obj.mesh !== topTextMesh && obj.mesh !== bottomTextMesh) {
+          const balloonIndex = prismMeshes.indexOf(obj.mesh);
+          if (balloonIndex >= 0 && balloonIndex < balloons.length) {
+            // Pass the actual velocity to make strings respond
+            const xVelocity = obj.physics.velocityX;
+            balloons[balloonIndex].updateStringShape(xVelocity);
+          }
+        }
+        
+        // Check boundaries and bounce - MODIFIED to ignore string for bottom boundary
+        const bounds = new THREE.Box3().setFromObject(obj.mesh);
+        
+        if (bounds.min.x < boundaries.left) {
+          obj.mesh.position.x += (boundaries.left - bounds.min.x);
+          obj.physics.velocityX = Math.abs(obj.physics.velocityX) * bounceStrength;
+        } else if (bounds.max.x > boundaries.right) {
+          obj.mesh.position.x -= (bounds.max.x - boundaries.right);
+          obj.physics.velocityX = -Math.abs(obj.physics.velocityX) * bounceStrength;
+        }
+        
+        // For bottom boundary, use the collision mesh (balloon only, not string)
+        if (obj.collisionMesh) {
+          // This is a balloon - use its collision mesh for bottom boundary
+          const collisionBounds = new THREE.Box3().setFromObject(obj.collisionMesh);
+          
+          if (collisionBounds.min.y < boundaries.bottom) {
+            // Adjust position to put the balloon body at the boundary
+            obj.mesh.position.y += (boundaries.bottom - collisionBounds.min.y);
+            obj.physics.velocityY = Math.abs(obj.physics.velocityY) * bounceStrength;
+          }
+        } else {
+          // This is a text object - use the full mesh for bottom boundary
+          if (bounds.min.y < boundaries.bottom) {
+            obj.mesh.position.y += (boundaries.bottom - bounds.min.y);
+            obj.physics.velocityY = Math.abs(obj.physics.velocityY) * bounceStrength;
+          }
+        }
+        
+        // Upper boundary applies to all objects the same way
+        if (bounds.max.y > boundaries.top) {
+          obj.mesh.position.y -= (bounds.max.y - boundaries.top);
+          obj.physics.velocityY = -Math.abs(obj.physics.velocityY) * bounceStrength;
+        }
+      }
+      
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Adjust camera and renderer on window resize
+    window.addEventListener('resize', function(){
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }, false);
+  </script>
+</body>
+</html>
